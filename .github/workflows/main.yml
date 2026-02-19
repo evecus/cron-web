@@ -1,12 +1,22 @@
 name: Build CronPanel
 
 on:
-  workflow_dispatch:  # 允许手动触发
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (例如 v1.0.1)'
+        required: true
+        default: 'v1.0'
 
 jobs:
   build:
-    name: Build Binaries
+    name: Build and Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # 必须包含此权限才能创建 Release
 
     steps:
       - name: Checkout code
@@ -23,67 +33,20 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
           else
             echo "VERSION=$(date +'%Y%m%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build linux/amd64
+      - name: Build Binaries
         run: |
           mkdir -p dist
+          # Build amd64
           GOOS=linux GOARCH=amd64 go build \
             -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o dist/cronpanel-linux-amd64 .
-
-      - name: Build linux/arm64
-        run: |
-          GOOS=linux GOARCH=arm64 go build \
-            -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
-            -o dist/cronpanel-linux-arm64 .
-
-      - name: Show binary info
-        run: |
-          echo "📦 Build artifacts:"
-          ls -lh dist/
-          file dist/*
-
-      # 每次 push 都上传 artifact（方便下载测试）
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cronpanel-${{ steps.version.outputs.VERSION }}
-          path: dist/
-          retention-days: 30
-
-  # 仅在打 tag 时创建 Release
-  release:
-    name: Create Release
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-          cache: true
-
-      - name: Get tag version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Build all binaries
-        run: |
-          mkdir -p dist
-          GOOS=linux GOARCH=amd64 go build \
-            -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
-            -o dist/cronpanel-linux-amd64 .
+          # Build arm64
           GOOS=linux GOARCH=arm64 go build \
             -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o dist/cronpanel-linux-arm64 .
@@ -93,48 +56,29 @@ jobs:
           cd dist
           sha256sum cronpanel-linux-amd64 > cronpanel-linux-amd64.sha256
           sha256sum cronpanel-linux-arm64 > cronpanel-linux-arm64.sha256
-          echo ""
-          echo "SHA256 Checksums:"
-          cat *.sha256
 
+      # 无论是否是 tag，都上传到 Artifacts 方便调试
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cronpanel-${{ steps.version.outputs.VERSION }}
+          path: dist/
+          retention-days: 7
+
+      # 仅在有 Tag 时触发 Release
       - name: Create GitHub Release
+        if: steps.version.outputs.IS_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: "CronPanel ${{ steps.version.outputs.VERSION }}"
           body: |
             ## CronPanel ${{ steps.version.outputs.VERSION }}
-
             现代化 Linux Crontab 定时任务 Web 管理面板
-
+            
             ### 下载
-
-            | 平台 | 架构 | 文件 |
-            |------|------|------|
-            | Linux | amd64 (x86_64) | `cronpanel-linux-amd64` |
-            | Linux | arm64 (ARMv8) | `cronpanel-linux-arm64` |
-
-            ### 快速使用
-
-            ```bash
-            # amd64
-            chmod +x cronpanel-linux-amd64
-            ./cronpanel-linux-amd64
-
-            # arm64
-            chmod +x cronpanel-linux-arm64
-            ./cronpanel-linux-arm64
-            ```
-
-            默认端口 **8899**，访问 http://localhost:8899
-
-            自定义端口：`PORT=9090 ./cronpanel-linux-amd64`
-
-            ### 功能
-            - ✅ 查看/添加/删除/启停 crontab 任务
-            - ✅ 多种调度模式：每天、每N天、每周、每月、自定义 Cron 表达式
-            - ✅ 支持直接命令、Shell 脚本路径、在线编写 Shell 脚本
-            - ✅ 现代化深色主题 Web UI
+            - `cronpanel-linux-amd64`: Linux x86_64
+            - `cronpanel-linux-arm64`: Linux ARM64 (如树莓派、甲骨文 ARM)
           files: |
             dist/cronpanel-linux-amd64
             dist/cronpanel-linux-arm64
