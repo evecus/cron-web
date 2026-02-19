@@ -152,7 +152,7 @@ func main() {
 	mux.HandleFunc("/api/jobs/delete", authMiddleware(handleDeleteJob))
 	mux.HandleFunc("/api/jobs/toggle", authMiddleware(handleToggleJob))
 
-	fmt.Printf("CronPanel running at http://localhost:%s\n", port)
+	fmt.Printf("CronPanel running at http://0.0.0.0:%s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
