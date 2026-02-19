@@ -24,8 +24,6 @@ type CronJob struct {
 	Command  string `json:"command"`
 	Comment  string `json:"comment"`
 	Enabled  bool   `json:"enabled"`
-	Log      bool   `json:"log"`
-	LogFile  string `json:"logFile"`
 	Raw      string `json:"raw"`
 }
 
@@ -42,7 +40,6 @@ type AddJobRequest struct {
 	ScriptContent string `json:"scriptContent"`
 	Comment       string `json:"comment"`
 	CustomCron    string `json:"customCron"`
-	Log           bool   `json:"log"`
 }
 
 type EditJobRequest struct {
@@ -59,7 +56,6 @@ type EditJobRequest struct {
 	ScriptContent string `json:"scriptContent"`
 	Comment       string `json:"comment"`
 	CustomCron    string `json:"customCron"`
-	Log           bool   `json:"log"`
 }
 
 type Response struct {
@@ -109,13 +105,12 @@ func (s *SessionStore) Delete(token string) {
 }
 
 var (
-	scriptDir   string
-	logDir      string
-	Version     = "dev"
-	authUser    string
-	authPass    string
+	scriptDir  string
+	Version    = "dev"
+	authUser   string
+	authPass   string
 	authEnabled bool
-	sessions    = newSessionStore()
+	sessions   = newSessionStore()
 )
 
 func main() {
@@ -150,8 +145,6 @@ func main() {
 	}
 	scriptDir = filepath.Join(filepath.Dir(exePath), "cronpanel-scripts")
 	os.MkdirAll(scriptDir, 0755)
-	logDir = filepath.Join(filepath.Dir(exePath), "cronpanel-logs")
-	os.MkdirAll(logDir, 0755)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
@@ -159,7 +152,6 @@ func main() {
 	mux.HandleFunc("/api/auth/logout", handleLogout)
 	mux.HandleFunc("/api/auth/check", handleAuthCheck)
 	mux.HandleFunc("/api/jobs/read-script", authMiddleware(handleReadScript))
-	mux.HandleFunc("/api/jobs/read-log", authMiddleware(handleReadLog))
 	mux.HandleFunc("/api/jobs", authMiddleware(handleJobs))
 	mux.HandleFunc("/api/jobs/add", authMiddleware(handleAddJob))
 	mux.HandleFunc("/api/jobs/edit", authMiddleware(handleEditJob))
@@ -273,7 +265,6 @@ func getCrontab() ([]CronJob, error) {
 		raw := line
 		comment := ""
 		enabled := true
-		enableLog := false
 
 		if strings.HasPrefix(line, "#!cm:") {
 			continue
@@ -291,11 +282,6 @@ func getCrontab() ([]CronJob, error) {
 		if idx := strings.Index(line, " #"); idx != -1 {
 			comment = strings.TrimSpace(line[idx+2:])
 			line = strings.TrimSpace(line[:idx])
-			// Parse log flag: comment ends with |LOG
-			if strings.HasSuffix(comment, "|LOG") {
-				enableLog = true
-				comment = strings.TrimSuffix(comment, "|LOG")
-			}
 		}
 
 		parts := strings.Fields(line)
@@ -305,21 +291,9 @@ func getCrontab() ([]CronJob, error) {
 		schedule := strings.Join(parts[:5], " ")
 		command := strings.Join(parts[5:], " ")
 
-		// Strip log redirection suffix from command for display
-		logFile := ""
-		if enableLog {
-			// Expected suffix pattern: >> <logDir>/xxx.log 2>&1
-			if idx := strings.Index(command, " >> "); idx != -1 {
-				logFile = strings.TrimSpace(command[idx+4:])
-				logFile = strings.TrimSuffix(logFile, " 2>&1")
-				command = strings.TrimSpace(command[:idx])
-			}
-		}
-
 		jobs = append(jobs, CronJob{
 			ID: strconv.Itoa(id), Schedule: schedule,
-			Command: command, Comment: comment, Enabled: enabled,
-			Log: enableLog, LogFile: logFile, Raw: raw,
+			Command: command, Comment: comment, Enabled: enabled, Raw: raw,
 		})
 		id++
 	}
@@ -330,26 +304,9 @@ func writeCrontab(jobs []CronJob) error {
 	var lines []string
 	lines = append(lines, "#!cm:managed by crontab-manager")
 	for _, job := range jobs {
-		command := job.Command
-		commentStr := job.Comment
-
-		// Append log redirection if enabled
-		if job.Log {
-			// Use sanitized comment as log filename, fallback to id
-			logName := sanitizeFilename(job.Comment)
-			if logName == "" {
-				logName = job.ID
-			}
-			logFile := filepath.Join(logDir, logName+".log")
-			command = command + " >> " + logFile + " 2>&1"
-			commentStr = job.Comment + "|LOG"
-		}
-
-		line := job.Schedule + " " + command
-		if commentStr != "" {
-			line += " #" + commentStr
-		} else if job.Log {
-			line += " #|LOG"
+		line := job.Schedule + " " + job.Command
+		if job.Comment != "" {
+			line += " #" + job.Comment
 		}
 		if !job.Enabled {
 			line = "#CM_DISABLED:" + line
@@ -360,24 +317,6 @@ func writeCrontab(jobs []CronJob) error {
 	cmd := exec.Command("crontab", "-")
 	cmd.Stdin = strings.NewReader(content)
 	return cmd.Run()
-}
-
-// sanitizeFilename converts a string to a safe filename.
-func sanitizeFilename(s string) string {
-	s = strings.TrimSpace(s)
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			b.WriteRune(r)
-		} else if r == ' ' {
-			b.WriteRune('_')
-		}
-	}
-	result := b.String()
-	if len(result) > 64 {
-		result = result[:64]
-	}
-	return result
 }
 
 func buildSchedule(req AddJobRequest) string {
@@ -460,38 +399,6 @@ func handleReadScript(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(Response{Success: true, Data: string(content)})
 }
 
-// handleReadLog reads a log file from logDir. Only allows files inside logDir.
-func handleReadLog(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	var req struct {
-		Path string `json:"path"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid request"})
-		return
-	}
-	absPath, err := filepath.Abs(req.Path)
-	if err != nil || !strings.HasPrefix(absPath, logDir) {
-		json.NewEncoder(w).Encode(Response{Success: false, Message: "access denied"})
-		return
-	}
-	content, err := os.ReadFile(absPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			json.NewEncoder(w).Encode(Response{Success: true, Data: "(日志文件尚不存在，任务尚未执行过)"})
-			return
-		}
-		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
-		return
-	}
-	// Return last 100KB to avoid huge responses
-	data := content
-	if len(data) > 100*1024 {
-		data = append([]byte("...(已截断，仅显示最后 100KB)...\n"), data[len(data)-100*1024:]...)
-	}
-	json.NewEncoder(w).Encode(Response{Success: true, Data: string(data)})
-}
-
 func handleJobs(w http.ResponseWriter, r *http.Request) {
 	jobs, err := getCrontab()
 	if err != nil {
@@ -526,7 +433,7 @@ func handleAddJob(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
 		return
 	}
-	newJob := CronJob{ID: strconv.Itoa(len(jobs)), Schedule: schedule, Command: command, Comment: req.Comment, Enabled: true, Log: req.Log}
+	newJob := CronJob{ID: strconv.Itoa(len(jobs)), Schedule: schedule, Command: command, Comment: req.Comment, Enabled: true}
 	jobs = append(jobs, newJob)
 	if err := writeCrontab(jobs); err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: "Failed to write crontab: " + err.Error()})
@@ -567,7 +474,6 @@ func handleEditJob(w http.ResponseWriter, r *http.Request) {
 			jobs[i].Schedule = schedule
 			jobs[i].Command = command
 			jobs[i].Comment = req.Comment
-			jobs[i].Log = req.Log
 			found = true
 			break
 		}
