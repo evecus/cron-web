@@ -3,20 +3,20 @@ name: Build CronPanel
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*' # 当推送以 v 开头的标签时触发 (例如 v1.0.1)
   workflow_dispatch:
     inputs:
       version:
         description: '发布版本号 (例如 v1.0.1)'
         required: true
-        default: 'v1.0'
+        default: 'v1.0.0'
 
 jobs:
   build:
     name: Build and Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write # 必须包含此权限才能创建 Release
+      contents: write # 核心权限：允许 Action 写入 Release 页面
 
     steps:
       - name: Checkout code
@@ -31,10 +31,16 @@ jobs:
       - name: Get version
         id: version
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # 1. 如果是通过网页手动点击运行
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # 2. 如果是通过推送 Git Tag 触发
             echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
             echo "IS_RELEASE=true" >> $GITHUB_OUTPUT
           else
+            # 3. 如果是普通 Push（仅构建不发布）
             echo "VERSION=$(date +'%Y%m%d')-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
             echo "IS_RELEASE=false" >> $GITHUB_OUTPUT
           fi
@@ -42,11 +48,11 @@ jobs:
       - name: Build Binaries
         run: |
           mkdir -p dist
-          # Build amd64
+          # 编译 Linux amd64
           GOOS=linux GOARCH=amd64 go build \
             -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o dist/cronpanel-linux-amd64 .
-          # Build arm64
+          # 编译 Linux arm64
           GOOS=linux GOARCH=arm64 go build \
             -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }}" \
             -o dist/cronpanel-linux-arm64 .
@@ -57,7 +63,6 @@ jobs:
           sha256sum cronpanel-linux-amd64 > cronpanel-linux-amd64.sha256
           sha256sum cronpanel-linux-arm64 > cronpanel-linux-arm64.sha256
 
-      # 无论是否是 tag，都上传到 Artifacts 方便调试
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -65,7 +70,7 @@ jobs:
           path: dist/
           retention-days: 7
 
-      # 仅在有 Tag 时触发 Release
+      # 只有当 IS_RELEASE 为 true 时，才会执行下面发布到 Release 的操作
       - name: Create GitHub Release
         if: steps.version.outputs.IS_RELEASE == 'true'
         uses: softprops/action-gh-release@v2
@@ -78,7 +83,13 @@ jobs:
             
             ### 下载
             - `cronpanel-linux-amd64`: Linux x86_64
-            - `cronpanel-linux-arm64`: Linux ARM64 (如树莓派、甲骨文 ARM)
+            - `cronpanel-linux-arm64`: Linux ARM64 (支持树莓派等)
+
+            ### 快速使用
+            ```bash
+            chmod +x cronpanel-linux-amd64
+            ./cronpanel-linux-amd64
+            ```
           files: |
             dist/cronpanel-linux-amd64
             dist/cronpanel-linux-arm64
