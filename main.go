@@ -24,18 +24,34 @@ type CronJob struct {
 }
 
 type AddJobRequest struct {
-	Mode        string `json:"mode"`        // interval, weekly, monthly, datetime, custom
-	Days        string `json:"days"`        // every N days
-	Weekday     string `json:"weekday"`     // 0-6
-	MonthDay    string `json:"monthDay"`    // 1-31
-	Month       string `json:"month"`       // 1-12 or *
-	Hour        string `json:"hour"`
-	Minute      string `json:"minute"`
-	Command     string `json:"command"`
-	ScriptPath  string `json:"scriptPath"`
+	Mode          string `json:"mode"`
+	Days          string `json:"days"`
+	Weekday       string `json:"weekday"`
+	MonthDay      string `json:"monthDay"`
+	Month         string `json:"month"`
+	Hour          string `json:"hour"`
+	Minute        string `json:"minute"`
+	Command       string `json:"command"`
+	ScriptPath    string `json:"scriptPath"`
 	ScriptContent string `json:"scriptContent"`
-	Comment     string `json:"comment"`
-	CustomCron  string `json:"customCron"`
+	Comment       string `json:"comment"`
+	CustomCron    string `json:"customCron"`
+}
+
+type EditJobRequest struct {
+	ID            string `json:"id"`
+	Mode          string `json:"mode"`
+	Days          string `json:"days"`
+	Weekday       string `json:"weekday"`
+	MonthDay      string `json:"monthDay"`
+	Month         string `json:"month"`
+	Hour          string `json:"hour"`
+	Minute        string `json:"minute"`
+	Command       string `json:"command"`
+	ScriptPath    string `json:"scriptPath"`
+	ScriptContent string `json:"scriptContent"`
+	Comment       string `json:"comment"`
+	CustomCron    string `json:"customCron"`
 }
 
 type Response struct {
@@ -62,10 +78,11 @@ func main() {
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/jobs", handleJobs)
 	mux.HandleFunc("/api/jobs/add", handleAddJob)
+	mux.HandleFunc("/api/jobs/edit", handleEditJob)
 	mux.HandleFunc("/api/jobs/delete", handleDeleteJob)
 	mux.HandleFunc("/api/jobs/toggle", handleToggleJob)
 
-	fmt.Printf("🚀 Crontab Manager running at http://localhost:%s\n", port)
+	fmt.Printf("CronPanel running at http://localhost:%s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -73,10 +90,6 @@ func getCrontab() ([]CronJob, error) {
 	cmd := exec.Command("crontab", "-l")
 	out, err := cmd.Output()
 	if err != nil {
-		if strings.Contains(err.Error(), "no crontab") || strings.Contains(string(out), "no crontab") {
-			return []CronJob{}, nil
-		}
-		// Return empty if no crontab exists
 		return []CronJob{}, nil
 	}
 
@@ -89,18 +102,21 @@ func getCrontab() ([]CronJob, error) {
 		comment := ""
 		enabled := true
 
+		// Skip manager header
 		if strings.HasPrefix(line, "#!cm:") {
-			continue
-		}
-		if strings.HasPrefix(line, "#") {
 			continue
 		}
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+
+		// Handle disabled jobs — MUST check before generic # skip
 		if strings.HasPrefix(line, "#CM_DISABLED:") {
 			line = strings.TrimPrefix(line, "#CM_DISABLED:")
 			enabled = false
+		} else if strings.HasPrefix(line, "#") {
+			// Regular comment, skip
+			continue
 		}
 
 		// Extract inline comment
@@ -151,24 +167,36 @@ func writeCrontab(jobs []CronJob) error {
 
 func buildSchedule(req AddJobRequest) string {
 	min := req.Minute
-	if min == "" { min = "0" }
+	if min == "" {
+		min = "0"
+	}
 	hour := req.Hour
-	if hour == "" { hour = "0" }
+	if hour == "" {
+		hour = "0"
+	}
 
 	switch req.Mode {
 	case "interval":
 		n, _ := strconv.Atoi(req.Days)
-		if n <= 0 { n = 1 }
+		if n <= 0 {
+			n = 1
+		}
 		return fmt.Sprintf("%s %s */%d * *", min, hour, n)
 	case "weekly":
 		wd := req.Weekday
-		if wd == "" { wd = "0" }
+		if wd == "" {
+			wd = "0"
+		}
 		return fmt.Sprintf("%s %s * * %s", min, hour, wd)
 	case "monthly":
 		md := req.MonthDay
-		if md == "" { md = "1" }
+		if md == "" {
+			md = "1"
+		}
 		month := req.Month
-		if month == "" { month = "*" }
+		if month == "" {
+			month = "*"
+		}
 		return fmt.Sprintf("%s %s %s %s *", min, hour, md, month)
 	case "daily":
 		return fmt.Sprintf("%s %s * * *", min, hour)
@@ -177,6 +205,15 @@ func buildSchedule(req AddJobRequest) string {
 	default:
 		return fmt.Sprintf("%s %s * * *", min, hour)
 	}
+}
+
+func buildScheduleFromEdit(req EditJobRequest) string {
+	add := AddJobRequest{
+		Mode: req.Mode, Days: req.Days, Weekday: req.Weekday,
+		MonthDay: req.MonthDay, Month: req.Month,
+		Hour: req.Hour, Minute: req.Minute, CustomCron: req.CustomCron,
+	}
+	return buildSchedule(add)
 }
 
 func handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +240,6 @@ func handleAddJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	command := req.Command
-	// Handle script content
 	if req.ScriptContent != "" {
 		fname := fmt.Sprintf("script_%d.sh", time.Now().UnixNano())
 		fpath := filepath.Join(scriptDir, fname)
@@ -245,13 +281,77 @@ func handleAddJob(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(Response{Success: true, Message: "Job added successfully", Data: newJob})
 }
 
+func handleEditJob(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "Method not allowed"})
+		return
+	}
+
+	var req EditJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
+		return
+	}
+
+	command := req.Command
+	if req.ScriptContent != "" {
+		fname := fmt.Sprintf("script_%d.sh", time.Now().UnixNano())
+		fpath := filepath.Join(scriptDir, fname)
+		if err := os.WriteFile(fpath, []byte(req.ScriptContent), 0755); err != nil {
+			json.NewEncoder(w).Encode(Response{Success: false, Message: "Failed to write script: " + err.Error()})
+			return
+		}
+		command = "/bin/bash " + fpath
+	} else if req.ScriptPath != "" {
+		command = "/bin/bash " + req.ScriptPath
+	}
+
+	if command == "" {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "Command is required"})
+		return
+	}
+
+	schedule := buildScheduleFromEdit(req)
+
+	jobs, err := getCrontab()
+	if err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
+		return
+	}
+
+	found := false
+	for i, j := range jobs {
+		if j.ID == req.ID {
+			jobs[i].Schedule = schedule
+			jobs[i].Command = command
+			jobs[i].Comment = req.Comment
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "Job not found"})
+		return
+	}
+
+	if err := writeCrontab(jobs); err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "Failed to write crontab: " + err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(Response{Success: true, Message: "Job updated successfully"})
+}
+
 func handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodPost {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: "Method not allowed"})
 		return
 	}
-	var req struct{ ID string `json:"id"` }
+	var req struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 
 	jobs, err := getCrontab()
@@ -276,7 +376,9 @@ func handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 
 func handleToggleJob(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	var req struct{ ID string `json:"id"` }
+	var req struct {
+		ID string `json:"id"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
 
 	jobs, err := getCrontab()
