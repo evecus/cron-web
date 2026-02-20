@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,12 +21,15 @@ import (
 )
 
 type CronJob struct {
-	ID       string `json:"id"`
+	ID      string `json:"id"`
 	Schedule string `json:"schedule"`
 	Command  string `json:"command"`
 	Comment  string `json:"comment"`
 	Enabled  bool   `json:"enabled"`
 	Raw      string `json:"raw"`
+	SaveLog  bool   `json:"saveLog"`
+	LogDir   string `json:"logDir"`
+	RealCmd  string `json:"realCmd"`
 }
 
 type AddJobRequest struct {
@@ -40,6 +45,7 @@ type AddJobRequest struct {
 	ScriptContent string `json:"scriptContent"`
 	Comment       string `json:"comment"`
 	CustomCron    string `json:"customCron"`
+	SaveLog       bool   `json:"saveLog"`
 }
 
 type EditJobRequest struct {
@@ -56,6 +62,7 @@ type EditJobRequest struct {
 	ScriptContent string `json:"scriptContent"`
 	Comment       string `json:"comment"`
 	CustomCron    string `json:"customCron"`
+	SaveLog       bool   `json:"saveLog"`
 }
 
 type Response struct {
@@ -64,7 +71,12 @@ type Response struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
-// Session store: token -> expiry
+type LogEntry struct {
+	Filename  string `json:"filename"`
+	CreatedAt string `json:"createdAt"`
+	Size      int64  `json:"size"`
+}
+
 type SessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time
@@ -105,12 +117,13 @@ func (s *SessionStore) Delete(token string) {
 }
 
 var (
-	scriptDir  string
-	Version    = "dev"
-	authUser   string
-	authPass   string
+	scriptDir   string
+	logBaseDir  string
+	Version     = "dev"
+	authUser    string
+	authPass    string
 	authEnabled bool
-	sessions   = newSessionStore()
+	sessions    = newSessionStore()
 )
 
 func main() {
@@ -138,13 +151,14 @@ func main() {
 	}
 
 	fmt.Printf("CronPanel %s\n", Version)
-	// Use a scripts/ directory next to the running binary, not /tmp
 	exePath, err := os.Executable()
 	if err != nil {
 		exePath = "."
 	}
 	scriptDir = filepath.Join(filepath.Dir(exePath), "cronpanel-scripts")
 	os.MkdirAll(scriptDir, 0755)
+	logBaseDir = filepath.Join(filepath.Dir(exePath), "cronpanel-logs")
+	os.MkdirAll(logBaseDir, 0755)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
@@ -157,12 +171,14 @@ func main() {
 	mux.HandleFunc("/api/jobs/edit", authMiddleware(handleEditJob))
 	mux.HandleFunc("/api/jobs/delete", authMiddleware(handleDeleteJob))
 	mux.HandleFunc("/api/jobs/toggle", authMiddleware(handleToggleJob))
+	mux.HandleFunc("/api/jobs/logs", authMiddleware(handleListLogs))
+	mux.HandleFunc("/api/jobs/logs/content", authMiddleware(handleLogContent))
+	mux.HandleFunc("/api/jobs/logs/delete", authMiddleware(handleDeleteLog))
 
 	fmt.Printf("CronPanel running at http://0.0.0.0:%s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
-// authMiddleware wraps handlers that require authentication
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -181,12 +197,10 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func getSessionToken(r *http.Request) string {
-	// Check Authorization header: Bearer <token>
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
-	// Check cookie fallback
 	c, err := r.Cookie("cp_session")
 	if err == nil {
 		return c.Value
@@ -250,6 +264,72 @@ func handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(Response{Success: true, Data: info})
 }
 
+func logDirForJob(comment, command string) string {
+	key := comment + "|" + command
+	h := md5.Sum([]byte(key))
+	slug := hex.EncodeToString(h[:])[:12]
+	name := slug
+	if comment != "" {
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '_'
+		}, comment)
+		if len(safe) > 20 {
+			safe = safe[:20]
+		}
+		name = safe + "_" + slug
+	}
+	return filepath.Join(logBaseDir, name)
+}
+
+// LOG_MARKER used to tag log-wrapped commands in crontab
+const LOG_MARKER = "#!cplog:"
+
+func wrapCommandWithLog(command, logDir string) string {
+	return fmt.Sprintf(`/bin/bash -c 'mkdir -p %s && %s >> %s/$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1' %s%s`,
+		shellQuote(logDir), command, shellQuote(logDir), LOG_MARKER, shellQuote(logDir))
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func parseLogWrapped(command string) (realCmd string, logDir string, isWrapped bool) {
+	// Check for our marker at the end
+	markerIdx := strings.LastIndex(command, LOG_MARKER)
+	if markerIdx < 0 {
+		return command, "", false
+	}
+	// Extract logDir from the marker suffix
+	markerSuffix := command[markerIdx+len(LOG_MARKER):]
+	// markerSuffix is 'LOGDIR' (single-quoted)
+	if !strings.HasPrefix(markerSuffix, "'") {
+		return command, "", false
+	}
+	logDir = strings.Trim(markerSuffix, "'")
+	if !strings.HasPrefix(logDir, logBaseDir) {
+		return command, "", false
+	}
+
+	// Extract the real command from: /bin/bash -c 'mkdir -p 'LOGDIR' && REALCMD >> 'LOGDIR'/... ' #!cplog:'LOGDIR'
+	// Find: && REALCMD >> 
+	prefix := `/bin/bash -c 'mkdir -p ` + shellQuote(logDir) + ` && `
+	if !strings.HasPrefix(command, prefix) {
+		return command, "", false
+	}
+	rest := command[len(prefix):]
+	// rest: REALCMD >> 'LOGDIR'/$(date...).log 2>&1' #!cplog:'LOGDIR'
+	suffix := ` >> ` + shellQuote(logDir)
+	suffixIdx := strings.Index(rest, suffix)
+	if suffixIdx < 0 {
+		return command, "", false
+	}
+	realCmd = rest[:suffixIdx]
+	return realCmd, logDir, true
+}
+
 func getCrontab() ([]CronJob, error) {
 	cmd := exec.Command("crontab", "-l")
 	out, err := cmd.Output()
@@ -279,8 +359,15 @@ func getCrontab() ([]CronJob, error) {
 			continue
 		}
 
-		if idx := strings.Index(line, " #"); idx != -1 {
-			comment = strings.TrimSpace(line[idx+2:])
+		// Extract comment BEFORE log marker check (comment follows last non-marker " #")
+		// But our LOG_MARKER uses #! so it won't be picked as a comment by cron
+		// The comment delimiter is " #" not "#!"
+		// We need to be careful: extract comment from the cron line (between command and our marker)
+		// Actually our wrapper puts #!cplog: after the bash -c '...' which is part of the command field
+		// So the full line is: SCHEDULE COMMAND_WITH_MARKER [user_comment_would_be_here]
+		// For simplicity, comments are stored separately
+		if idx := strings.Index(line, " ##"); idx != -1 {
+			comment = strings.TrimSpace(line[idx+3:])
 			line = strings.TrimSpace(line[:idx])
 		}
 
@@ -291,9 +378,19 @@ func getCrontab() ([]CronJob, error) {
 		schedule := strings.Join(parts[:5], " ")
 		command := strings.Join(parts[5:], " ")
 
+		saveLog := false
+		logDir := ""
+		realCmd := command
+		if rc, ld, isWrapped := parseLogWrapped(command); isWrapped {
+			saveLog = true
+			logDir = ld
+			realCmd = rc
+		}
+
 		jobs = append(jobs, CronJob{
 			ID: strconv.Itoa(id), Schedule: schedule,
 			Command: command, Comment: comment, Enabled: enabled, Raw: raw,
+			SaveLog: saveLog, LogDir: logDir, RealCmd: realCmd,
 		})
 		id++
 	}
@@ -306,7 +403,7 @@ func writeCrontab(jobs []CronJob) error {
 	for _, job := range jobs {
 		line := job.Schedule + " " + job.Command
 		if job.Comment != "" {
-			line += " #" + job.Comment
+			line += " ##" + job.Comment
 		}
 		if !job.Enabled {
 			line = "#CM_DISABLED:" + line
@@ -321,23 +418,35 @@ func writeCrontab(jobs []CronJob) error {
 
 func buildSchedule(req AddJobRequest) string {
 	min := req.Minute
-	if min == "" { min = "0" }
+	if min == "" {
+		min = "0"
+	}
 	hour := req.Hour
-	if hour == "" { hour = "0" }
+	if hour == "" {
+		hour = "0"
+	}
 	switch req.Mode {
 	case "interval":
 		n, _ := strconv.Atoi(req.Days)
-		if n <= 0 { n = 1 }
+		if n <= 0 {
+			n = 1
+		}
 		return fmt.Sprintf("%s %s */%d * *", min, hour, n)
 	case "weekly":
 		wd := req.Weekday
-		if wd == "" { wd = "0" }
+		if wd == "" {
+			wd = "0"
+		}
 		return fmt.Sprintf("%s %s * * %s", min, hour, wd)
 	case "monthly":
 		md := req.MonthDay
-		if md == "" { md = "1" }
+		if md == "" {
+			md = "1"
+		}
 		month := req.Month
-		if month == "" { month = "*" }
+		if month == "" {
+			month = "*"
+		}
 		return fmt.Sprintf("%s %s %s %s *", min, hour, md, month)
 	case "daily":
 		return fmt.Sprintf("%s %s * * *", min, hour)
@@ -371,8 +480,6 @@ func resolveCommand(req AddJobRequest) (string, error) {
 	return command, nil
 }
 
-// handleReadScript reads the content of a script file generated by CronPanel.
-// It only allows reading files inside scriptDir to prevent path traversal.
 func handleReadScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	var req struct {
@@ -382,10 +489,8 @@ func handleReadScript(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid request"})
 		return
 	}
-	// Strip "/bin/bash " prefix if present
 	fpath := strings.TrimPrefix(req.Path, "/bin/bash ")
 	fpath = strings.TrimSpace(fpath)
-	// Security: only allow files inside scriptDir
 	absPath, err := filepath.Abs(fpath)
 	if err != nil || !strings.HasPrefix(absPath, scriptDir) {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: "access denied"})
@@ -428,12 +533,24 @@ func handleAddJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	schedule := buildSchedule(req)
+
+	logDir := ""
+	finalCommand := command
+	if req.SaveLog {
+		logDir = logDirForJob(req.Comment, command)
+		os.MkdirAll(logDir, 0755)
+		finalCommand = wrapCommandWithLog(command, logDir)
+	}
+
 	jobs, err := getCrontab()
 	if err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
 		return
 	}
-	newJob := CronJob{ID: strconv.Itoa(len(jobs)), Schedule: schedule, Command: command, Comment: req.Comment, Enabled: true}
+	newJob := CronJob{
+		ID: strconv.Itoa(len(jobs)), Schedule: schedule, Command: finalCommand,
+		Comment: req.Comment, Enabled: true, SaveLog: req.SaveLog, LogDir: logDir, RealCmd: command,
+	}
 	jobs = append(jobs, newJob)
 	if err := writeCrontab(jobs); err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: "Failed to write crontab: " + err.Error()})
@@ -463,6 +580,15 @@ func handleEditJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	schedule := buildScheduleFromEdit(req)
+
+	logDir := ""
+	finalCommand := command
+	if req.SaveLog {
+		logDir = logDirForJob(req.Comment, command)
+		os.MkdirAll(logDir, 0755)
+		finalCommand = wrapCommandWithLog(command, logDir)
+	}
+
 	jobs, err := getCrontab()
 	if err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
@@ -472,8 +598,11 @@ func handleEditJob(w http.ResponseWriter, r *http.Request) {
 	for i, j := range jobs {
 		if j.ID == req.ID {
 			jobs[i].Schedule = schedule
-			jobs[i].Command = command
+			jobs[i].Command = finalCommand
 			jobs[i].Comment = req.Comment
+			jobs[i].SaveLog = req.SaveLog
+			jobs[i].LogDir = logDir
+			jobs[i].RealCmd = command
 			found = true
 			break
 		}
@@ -503,7 +632,9 @@ func handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	}
 	var newJobs []CronJob
 	for _, j := range jobs {
-		if j.ID != req.ID { newJobs = append(newJobs, j) }
+		if j.ID != req.ID {
+			newJobs = append(newJobs, j)
+		}
 	}
 	if err := writeCrontab(newJobs); err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
@@ -521,13 +652,126 @@ func handleToggleJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, j := range jobs {
-		if j.ID == req.ID { jobs[i].Enabled = !j.Enabled }
+		if j.ID == req.ID {
+			jobs[i].Enabled = !j.Enabled
+		}
 	}
 	if err := writeCrontab(jobs); err != nil {
 		json.NewEncoder(w).Encode(Response{Success: false, Message: err.Error()})
 		return
 	}
 	json.NewEncoder(w).Encode(Response{Success: true, Message: "Toggled"})
+}
+
+func handleListLogs(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LogDir string `json:"logDir"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid request"})
+		return
+	}
+	absDir, err := filepath.Abs(req.LogDir)
+	if err != nil || !strings.HasPrefix(absDir, logBaseDir) {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "access denied"})
+		return
+	}
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		json.NewEncoder(w).Encode(Response{Success: true, Data: []LogEntry{}})
+		return
+	}
+	var logs []LogEntry
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		ts := strings.TrimSuffix(e.Name(), ".log")
+		t, parseErr := time.ParseInLocation("20060102_150405", ts, time.Local)
+		createdAt := e.Name()
+		if parseErr == nil {
+			createdAt = t.Format("2006-01-02 15:04:05")
+		}
+		logs = append(logs, LogEntry{
+			Filename:  e.Name(),
+			CreatedAt: createdAt,
+			Size:      info.Size(),
+		})
+	}
+	sort.Slice(logs, func(i, j int) bool {
+		return logs[i].Filename > logs[j].Filename
+	})
+	json.NewEncoder(w).Encode(Response{Success: true, Data: logs})
+}
+
+func handleLogContent(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LogDir   string `json:"logDir"`
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid request"})
+		return
+	}
+	absDir, err := filepath.Abs(req.LogDir)
+	if err != nil || !strings.HasPrefix(absDir, logBaseDir) {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "access denied"})
+		return
+	}
+	if strings.ContainsAny(req.Filename, "/\\") {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid filename"})
+		return
+	}
+	fpath := filepath.Join(absDir, req.Filename)
+	content, err := os.ReadFile(fpath)
+	if err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "file not found"})
+		return
+	}
+	const maxSize = 512 * 1024
+	if len(content) > maxSize {
+		content = append([]byte("...(showing last 512KB)...\n"), content[len(content)-maxSize:]...)
+	}
+	json.NewEncoder(w).Encode(Response{Success: true, Data: string(content)})
+}
+
+func handleDeleteLog(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LogDir   string `json:"logDir"`
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid request"})
+		return
+	}
+	absDir, err := filepath.Abs(req.LogDir)
+	if err != nil || !strings.HasPrefix(absDir, logBaseDir) {
+		json.NewEncoder(w).Encode(Response{Success: false, Message: "access denied"})
+		return
+	}
+	if req.Filename == "" {
+		entries, err := os.ReadDir(absDir)
+		if err != nil {
+			json.NewEncoder(w).Encode(Response{Success: true})
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".log") {
+				os.Remove(filepath.Join(absDir, e.Name()))
+			}
+		}
+	} else {
+		if strings.ContainsAny(req.Filename, "/\\") {
+			json.NewEncoder(w).Encode(Response{Success: false, Message: "invalid filename"})
+			return
+		}
+		os.Remove(filepath.Join(absDir, req.Filename))
+	}
+	json.NewEncoder(w).Encode(Response{Success: true, Message: "Deleted"})
 }
 
 func handleIndex(w http.ResponseWriter, r *http.Request) {
