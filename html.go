@@ -209,6 +209,28 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* ── LOG STYLES ── */
+.log-badge{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;border-radius:5px;padding:2px 7px;flex-shrink:0}
+.log-list{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto}
+.log-item{display:flex;align-items:center;gap:10px;padding:9px 13px;background:var(--surface2);border:1.5px solid var(--border);border-radius:9px;cursor:pointer;transition:all 0.15s}
+.log-item:hover{border-color:var(--accent);background:var(--accent-light)}
+.log-item-time{font-size:12.5px;font-weight:600;color:var(--text);font-family:'IBM Plex Mono',monospace;flex:1}
+.log-item-size{font-size:11px;color:var(--text3);flex-shrink:0}
+.log-content-wrap{background:#0f172a;border-radius:10px;padding:16px;overflow:auto;max-height:440px;margin-top:2px}
+.log-content{font-family:'IBM Plex Mono',monospace;font-size:12px;color:#e2e8f0;white-space:pre-wrap;word-break:break-all;line-height:1.6}
+.log-empty{text-align:center;padding:40px;color:var(--text3)}
+.log-empty-icon{font-size:32px;margin-bottom:10px}
+.log-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:8px;flex-wrap:wrap}
+.log-filename{font-size:11.5px;color:var(--text3);font-family:'IBM Plex Mono',monospace}
+.toggle-wrap{display:flex;align-items:center;gap:10px;padding:12px 14px;background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;cursor:pointer;transition:all 0.15s;user-select:none}
+.toggle-wrap:hover{border-color:var(--accent);background:var(--accent-light)}
+.toggle-switch{width:40px;height:22px;background:#cbd5e1;border-radius:11px;position:relative;transition:background 0.2s;flex-shrink:0}
+.toggle-switch.on{background:var(--accent)}
+.toggle-switch::after{content:'';position:absolute;top:3px;left:3px;width:16px;height:16px;background:white;border-radius:50%;transition:transform 0.2s;box-shadow:0 1px 3px rgba(0,0,0,0.2)}
+.toggle-switch.on::after{transform:translateX(18px)}
+.toggle-label{font-size:13px;font-weight:500;color:var(--text2)}
+.toggle-sub{font-size:11.5px;color:var(--text3);margin-top:1px}
 </style>
 </head>
 <body>
@@ -540,10 +562,68 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
         </div>
       </div>
 
+      <div class="divider"></div>
+
+      <!-- ⑥ 日志设置 -->
+      <div class="section-block">
+        <div class="section-block-title" data-i18n="step_log"></div>
+        <div class="toggle-wrap" onclick="toggleSaveLog()" id="log-toggle-wrap">
+          <div style="flex:1">
+            <div class="toggle-label" data-i18n="lbl_save_log"></div>
+            <div class="toggle-sub" data-i18n="lbl_save_log_sub"></div>
+          </div>
+          <div class="toggle-switch" id="log-toggle-switch"></div>
+        </div>
+      </div>
+
     </div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="closeModal()" data-i18n="btn_cancel"></button>
       <button class="btn btn-primary btn-sm" id="btn-submit" onclick="submitJob()" data-i18n="btn_confirm"></button>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOG LIST MODAL ── -->
+<div class="modal-overlay" id="log-list-modal">
+  <div class="modal modal-sm" style="max-width:560px">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <div class="modal-title-icon">📋</div>
+        <div class="modal-title" id="log-list-title" data-i18n="log_list_title"></div>
+      </div>
+      <button class="modal-close" onclick="closeLogListModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="log-toolbar">
+        <div id="log-list-sub" style="font-size:12.5px;color:var(--text3)"></div>
+        <button class="btn btn-danger btn-sm" onclick="deleteAllLogs()" id="btn-delete-all-logs" data-i18n="btn_clear_logs"></button>
+      </div>
+      <div id="log-list-content"><div class="loading"><div class="spinner"></div></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── LOG CONTENT MODAL ── -->
+<div class="modal-overlay" id="log-content-modal">
+  <div class="modal" style="max-width:800px">
+    <div class="modal-header">
+      <div class="modal-title-wrap">
+        <div class="modal-title-icon">📄</div>
+        <div>
+          <div class="modal-title" data-i18n="log_content_title"></div>
+          <div class="log-filename" id="log-content-filename"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-danger btn-sm" onclick="deleteCurrentLog()" data-i18n="btn_delete_log"></button>
+        <button class="modal-close" onclick="closeLogContentModal()">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="log-content-wrap">
+        <pre class="log-content" id="log-content-text"></pre>
+      </div>
     </div>
   </div>
 </div>
@@ -601,6 +681,12 @@ const I18N={
     wd0:'周日',wd1:'周一',wd2:'周二',wd3:'周三',wd4:'周四',wd5:'周五',wd6:'周六',
     human_daily:'每天 {H}:{M} 执行',human_interval:'每 {D} 天 {H}:{M} 执行',
     human_specific_day:'每月 {MD} 日 {H}:{M} 执行',human_custom:'自定义: {E}',
+    step_log:'日志设置',lbl_save_log:'保存运行日志',lbl_save_log_sub:'每次执行后将输出持久化保存到文件',
+    btn_view_logs:'查看日志',log_list_title:'运行日志',log_content_title:'日志内容',
+    btn_clear_logs:'清空全部',btn_delete_log:'删除此条',
+    log_empty_title:'暂无日志',log_empty_sub:'任务执行后日志将显示在这里',
+    log_delete_confirm:'确认删除该日志文件？',log_clear_confirm:'确认清空全部日志？此操作不可撤销。',
+    toast_log_deleted:'日志已删除',toast_log_cleared:'日志已清空',
   },
   en:{
     sub:'Cron Job Manager',nav_features:'Menu',nav_dashboard:'Dashboard',nav_add:'Add Job',
@@ -652,6 +738,12 @@ const I18N={
     wd0:'Sun',wd1:'Mon',wd2:'Tue',wd3:'Wed',wd4:'Thu',wd5:'Fri',wd6:'Sat',
     human_daily:'Every day at {H}:{M}',human_interval:'Every {D} days at {H}:{M}',
     human_specific_day:'Day {MD} of each month at {H}:{M}',human_custom:'Custom: {E}',
+    step_log:'Logging',lbl_save_log:'Save Run Logs',lbl_save_log_sub:'Persist stdout/stderr output to files after each run',
+    btn_view_logs:'View Logs',log_list_title:'Run Logs',log_content_title:'Log Content',
+    btn_clear_logs:'Clear All',btn_delete_log:'Delete',
+    log_empty_title:'No logs yet',log_empty_sub:'Logs will appear here after the job runs',
+    log_delete_confirm:'Delete this log file?',log_clear_confirm:'Clear all logs? This cannot be undone.',
+    toast_log_deleted:'Log deleted',toast_log_cleared:'Logs cleared',
   }
 };
 let lang='zh';
@@ -734,7 +826,7 @@ function closeSidebar(){
 }
 
 // ── Form state ────────────────────────────────────────────
-let editingId=null,dayType='daily',monthType='every-month',weekType='every-week',useCustom=false;
+let editingId=null,dayType='daily',monthType='every-month',weekType='every-week',useCustom=false,saveLog=false;
 
 // Detect if a command is a CronPanel-generated script path
 function isManagedScript(cmd){
@@ -769,37 +861,40 @@ async function prefillEdit(job){
   }
   document.getElementById('f-comment').value=job.comment||'';
 
-  // Detect command type
-  if(isManagedScript(job.command)){
+  // Handle saveLog
+  if(job.saveLog){saveLog=true;const sw=document.getElementById('log-toggle-switch');if(sw)sw.classList.add('on');}
+
+  // Detect command type - use realCmd if available (log-wrapped jobs)
+  const cmdToUse = job.realCmd || job.command;
+  if(isManagedScript(cmdToUse)){
     // It's a managed script — read the file content
     document.getElementById('f-cmd-type').value='script-content';
     updateCmdType();
     try{
-      const res=await fetch('/api/jobs/read-script',{method:'POST',headers:authHeaders(),body:JSON.stringify({path:job.command})});
+      const res=await fetch('/api/jobs/read-script',{method:'POST',headers:authHeaders(),body:JSON.stringify({path:cmdToUse})});
       const data=await res.json();
       if(data.success){
         document.getElementById('f-script-content').value=data.data||'';
       } else {
-        // File missing (e.g. moved); fall back to showing path
         document.getElementById('f-cmd-type').value='cmd';
         updateCmdType();
-        document.getElementById('f-command').value=job.command;
+        document.getElementById('f-command').value=cmdToUse;
         showToast('脚本文件未找到，已显示原始命令','error');
       }
     } catch(e){
       document.getElementById('f-cmd-type').value='cmd';
       updateCmdType();
-      document.getElementById('f-command').value=job.command;
+      document.getElementById('f-command').value=cmdToUse;
     }
-  } else if(/^\/bin\/bash\s+/.test(job.command)){
+  } else if(/^\/bin\/bash\s+/.test(cmdToUse)){
     // External script path
     document.getElementById('f-cmd-type').value='script-path';
     updateCmdType();
-    document.getElementById('f-script-path').value=job.command.replace(/^\/bin\/bash\s+/,'');
+    document.getElementById('f-script-path').value=cmdToUse.replace(/^\/bin\/bash\s+/,'');
   } else {
     document.getElementById('f-cmd-type').value='cmd';
     updateCmdType();
-    document.getElementById('f-command').value=job.command;
+    document.getElementById('f-command').value=cmdToUse;
   }
   updatePreview();
 }
@@ -808,6 +903,7 @@ function selectDayType(val,el){dayType=val;document.querySelectorAll('#day-type-
 function selectMonthType(val,el){monthType=val;document.querySelectorAll('#month-type-grid .choice-card').forEach(c=>c.classList.remove('selected'));if(el)el.classList.add('selected');document.getElementById('month-interval-row').style.display=val==='month-interval'?'':'none';document.getElementById('month-specific-row').style.display=val==='specific-month'?'':'none';updatePreview();}
 function selectWeekType(val,el){weekType=val;document.querySelectorAll('#week-type-grid .choice-card').forEach(c=>c.classList.remove('selected'));if(el)el.classList.add('selected');document.getElementById('week-interval-row').style.display=val==='week-interval'?'':'none';document.getElementById('week-specific-row').style.display=val==='specific-weekday'?'':'none';updatePreview();}
 function toggleCustom(){useCustom=document.getElementById('use-custom').checked;document.getElementById('custom-cron-row').style.display=useCustom?'':'none';updatePreview();}
+function toggleSaveLog(){saveLog=!saveLog;const sw=document.getElementById('log-toggle-switch');if(sw)sw.classList.toggle('on',saveLog);}
 function updateCmdType(){const v=document.getElementById('f-cmd-type').value;document.getElementById('cmd-section-cmd').style.display=v==='cmd'?'':'none';document.getElementById('cmd-section-script-path').style.display=v==='script-path'?'':'none';document.getElementById('cmd-section-script-content').style.display=v==='script-content'?'':'none';}
 
 function getCronExpr(){
@@ -851,7 +947,7 @@ async function submitJob(){
     days:document.getElementById('f-days').value||'2',weekday:document.getElementById('f-weekday').value||'0',
     monthDay:document.getElementById('f-monthday').value||'1',month:document.getElementById('f-month').value||'*',
     hour:document.getElementById('f-hour').value||'0',minute:document.getElementById('f-minute').value||'0',
-    comment:document.getElementById('f-comment').value.trim(),command,scriptPath,scriptContent};
+    comment:document.getElementById('f-comment').value.trim(),command,scriptPath,scriptContent,saveLog};
   if(editingId) body.id=editingId;
   const btn=document.getElementById('btn-submit');btn.disabled=true;
   try{
@@ -874,6 +970,7 @@ function resetForm(){
   ['f-command','f-script-path','f-script-content','f-comment','f-custom'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   document.getElementById('use-custom').checked=false;document.getElementById('f-cmd-type').value='cmd';
   useCustom=false;document.getElementById('custom-cron-row').style.display='none';updateCmdType();
+  saveLog=false;const sw=document.getElementById('log-toggle-switch');if(sw)sw.classList.remove('on');
   dayType='daily';monthType='every-month';weekType='every-week';
   selectDayType('daily',document.querySelector('#day-type-grid [data-val="daily"]'));
   selectMonthType('every-month',document.querySelector('#month-type-grid [data-val="every-month"]'));
@@ -901,13 +998,17 @@ function renderJobs(jobs){
   el.innerHTML=jobs.map(job=>{
     const isOn=job.enabled;
     const label=job.comment||(job.command.length>48?job.command.substring(0,48)+'...':job.command);
+    const displayCmd = job.saveLog&&job.realCmd ? job.realCmd : job.command;
     const id=escAttr(job.id);
+    const logDirSafe=escAttr(job.logDir||'');
+    const logBadge=job.saveLog?'<span class="log-badge">📋 LOG</span>':'';
     return '<div class="job-card '+(isOn?'':'disabled')+'">'+
       '<div class="job-status '+(isOn?'on':'off')+'"></div>'+
-      '<div class="job-info"><div class="job-comment">'+escHtml(label)+'</div>'+
-      '<span class="job-command">'+escHtml(job.command)+'</span></div>'+
+      '<div class="job-info" style="flex:1;min-width:0"><div class="job-comment" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'+escHtml(label)+logBadge+'</div>'+
+      '<span class="job-command">'+escHtml(displayCmd.length>60?displayCmd.substring(0,60)+'...':displayCmd)+'</span></div>'+
       '<span class="job-schedule">'+escHtml(job.schedule)+'</span>'+
       '<div class="job-actions">'+
+        (job.saveLog?'<button class="btn btn-ghost btn-sm" onclick="openLogListModal(\''+id+'\',\''+logDirSafe+'\')">📋 '+t('btn_view_logs')+'</button>':'')+
         '<button class="btn btn-ghost btn-sm" onclick="editJob(\''+id+'\')">✏️ '+t('btn_edit')+'</button>'+
         '<button class="btn '+(isOn?'btn-warning':'btn-ghost')+' btn-sm" onclick="toggleJob(\''+id+'\')">'+
           (isOn?'⏸ '+t('btn_disable'):'▶ '+t('btn_enable'))+'</button>'+
@@ -951,6 +1052,84 @@ function showToast(msg,type){
   d.innerHTML='<span>'+(type==='success'?'✓':'✕')+'</span>'+escHtml(msg);
   document.body.appendChild(d);
   toastTimer=setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity 0.3s';setTimeout(()=>d.remove(),300);},3000);
+}
+
+// ── Log viewer ────────────────────────────────────────────
+let currentLogDir='',currentLogFilename='';
+
+function fmtSize(bytes){
+  if(bytes<1024)return bytes+' B';
+  if(bytes<1024*1024)return (bytes/1024).toFixed(1)+' KB';
+  return (bytes/1024/1024).toFixed(2)+' MB';
+}
+
+async function openLogListModal(jobId,logDir){
+  currentLogDir=logDir;
+  document.getElementById('log-list-modal').classList.add('open');
+  document.getElementById('log-list-content').innerHTML='<div class="loading"><div class="spinner"></div></div>';
+  await refreshLogList();
+}
+function closeLogListModal(){document.getElementById('log-list-modal').classList.remove('open');currentLogDir='';}
+document.getElementById('log-list-modal').addEventListener('click',function(e){if(e.target===this)closeLogListModal();});
+
+async function refreshLogList(){
+  try{
+    const res=await fetch('/api/jobs/logs',{method:'POST',headers:authHeaders(),body:JSON.stringify({logDir:currentLogDir})});
+    const data=await res.json();
+    const logs=data.data||[];
+    const sub=document.getElementById('log-list-sub');
+    if(sub)sub.textContent=logs.length+' '+t('log_list_title');
+    const btnDel=document.getElementById('btn-delete-all-logs');
+    if(btnDel)btnDel.style.display=logs.length?'':'none';
+    const cont=document.getElementById('log-list-content');
+    if(!logs.length){
+      cont.innerHTML='<div class="log-empty"><div class="log-empty-icon">📭</div><div style="font-weight:600;color:var(--text)">'+t('log_empty_title')+'</div><div style="font-size:12.5px;color:var(--text3);margin-top:4px">'+t('log_empty_sub')+'</div></div>';
+      return;
+    }
+    cont.innerHTML='<div class="log-list">'+logs.map(l=>'<div class="log-item" onclick="openLogContent(\''+escAttr(l.filename)+'\')">'+
+      '<span style="font-size:16px">📄</span>'+
+      '<div style="flex:1;min-width:0"><div class="log-item-time">'+escHtml(l.createdAt)+'</div>'+
+      '<div class="log-item-size">'+fmtSize(l.size)+'</div></div>'+
+      '<button class="btn btn-danger btn-sm btn-icon" onclick="event.stopPropagation();deleteLog(\''+escAttr(l.filename)+'\')">✕</button>'+
+      '</div>').join('')+'</div>';
+  }catch(e){showToast(e.message,'error');}
+}
+
+async function openLogContent(filename){
+  currentLogFilename=filename;
+  document.getElementById('log-content-filename').textContent=filename;
+  document.getElementById('log-content-text').textContent='Loading...';
+  document.getElementById('log-content-modal').classList.add('open');
+  try{
+    const res=await fetch('/api/jobs/logs/content',{method:'POST',headers:authHeaders(),body:JSON.stringify({logDir:currentLogDir,filename})});
+    const data=await res.json();
+    document.getElementById('log-content-text').textContent=data.data||'(empty)';
+  }catch(e){document.getElementById('log-content-text').textContent='Error: '+e.message;}
+}
+function closeLogContentModal(){document.getElementById('log-content-modal').classList.remove('open');currentLogFilename='';}
+document.getElementById('log-content-modal').addEventListener('click',function(e){if(e.target===this)closeLogContentModal();});
+
+async function deleteLog(filename){
+  if(!confirm(t('log_delete_confirm')))return;
+  try{
+    await fetch('/api/jobs/logs/delete',{method:'POST',headers:authHeaders(),body:JSON.stringify({logDir:currentLogDir,filename})});
+    showToast(t('toast_log_deleted'),'success');
+    if(document.getElementById('log-content-modal').classList.contains('open'))closeLogContentModal();
+    await refreshLogList();
+  }catch(e){showToast(e.message,'error');}
+}
+
+async function deleteCurrentLog(){
+  if(currentLogFilename)await deleteLog(currentLogFilename);
+}
+
+async function deleteAllLogs(){
+  if(!confirm(t('log_clear_confirm')))return;
+  try{
+    await fetch('/api/jobs/logs/delete',{method:'POST',headers:authHeaders(),body:JSON.stringify({logDir:currentLogDir,filename:''})});
+    showToast(t('toast_log_cleared'),'success');
+    await refreshLogList();
+  }catch(e){showToast(e.message,'error');}
 }
 
 // ── Init ──────────────────────────────────────────────────
