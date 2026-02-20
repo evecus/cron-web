@@ -309,10 +309,6 @@ body{background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans
         <div class="nav-icon">⊞</div>
         <span data-i18n="nav_dashboard"></span>
       </div>
-      <div class="nav-item" onclick="closeSidebar();openJobModal()">
-        <div class="nav-icon">＋</div>
-        <span data-i18n="nav_add"></span>
-      </div>
     </div>
     <div class="sidebar-footer">
       <div class="status-badge"><div class="status-dot"></div><span data-i18n="status_running"></span></div>
